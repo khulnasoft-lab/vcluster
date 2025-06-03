@@ -13,7 +13,6 @@ import (
 	requestpkg "github.com/loft-sh/vcluster/pkg/util/request"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apiserver/pkg/endpoints/handlers/responsewriters"
 	"k8s.io/apiserver/pkg/endpoints/request"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -34,8 +33,9 @@ func WithPodSchedulerCheck(h http.Handler, ctx *synccontext.RegisterContext, cac
 			requestpkg.FailWithStatus(w, req, http.StatusInternalServerError, fmt.Errorf("request info is missing"))
 			return
 		}
-		if !isPodBindingRequest(requestInfo) {
+		if !isCreatePodBindingRequest(requestInfo) {
 			h.ServeHTTP(w, req)
+			return
 		}
 
 		requestBody, err := io.ReadAll(req.Body)
@@ -49,6 +49,10 @@ func WithPodSchedulerCheck(h http.Handler, ctx *synccontext.RegisterContext, cac
 			responsewriters.ErrorNegotiated(err, s, corev1.SchemeGroupVersion, w, req)
 			return
 		}
+		if vBinding.Namespace == "" || vBinding.Name == "" {
+			h.ServeHTTP(w, req)
+			return
+		}
 
 		pod, err := getPodFromBinding(ctx, ctx.VirtualManager.GetClient(), vBinding)
 		if err != nil {
@@ -57,7 +61,7 @@ func WithPodSchedulerCheck(h http.Handler, ctx *synccontext.RegisterContext, cac
 		}
 
 		if isSchedulerConfiguredAsHostScheduler(ctx.Config.Sync.ToHost.Pods.HybridScheduling.HostSchedulers, pod.Spec.SchedulerName) {
-			err = fmt.Errorf("scheduler %s is configured as a host scheduler, so scheduler with the same name is not allowed to schedule pods in the virtual cluster", pod.Spec.SchedulerName)
+			err = fmt.Errorf("scheduler %s is configured as a host scheduler, so a scheduler with the same name is not allowed to schedule the pods in the virtual cluster", pod.Spec.SchedulerName)
 			requestpkg.FailWithStatus(w, req, http.StatusMethodNotAllowed, err)
 			return
 		}
@@ -66,7 +70,7 @@ func WithPodSchedulerCheck(h http.Handler, ctx *synccontext.RegisterContext, cac
 	})
 }
 
-func isPodBindingRequest(r *request.RequestInfo) bool {
+func isCreatePodBindingRequest(r *request.RequestInfo) bool {
 	if !r.IsResourceRequest {
 		return false
 	}
@@ -74,7 +78,8 @@ func isPodBindingRequest(r *request.RequestInfo) bool {
 	return r.APIGroup == corev1.SchemeGroupVersion.Group &&
 		r.APIVersion == corev1.SchemeGroupVersion.Version &&
 		r.Resource == "pods" &&
-		r.Subresource == "bind"
+		r.Subresource == "binding" &&
+		r.Verb == "create"
 }
 
 func getBindingResourceFromRequest(requestInfo *request.RequestInfo, requestBody []byte, decoder encoding.Decoder) (*corev1.Binding, error) {
@@ -100,7 +105,7 @@ func getBindingResourceFromRequest(requestInfo *request.RequestInfo, requestBody
 }
 
 func getPodFromBinding(ctx context.Context, cachedVirtualClient client.Client, binding *corev1.Binding) (*corev1.Pod, error) {
-	namespacedName := types.NamespacedName{
+	namespacedName := client.ObjectKey{
 		Namespace: binding.Namespace,
 		Name:      binding.Name,
 	}
